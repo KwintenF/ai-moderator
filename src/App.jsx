@@ -555,7 +555,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex" style={{ fontFamily: "'DM Mono', monospace" }}>
 
       {/* Sidebar — hidden in student mode */}
-      {!IS_STUDENT_MODE && <div className="w-72 min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col shrink-0">
+      {!IS_STUDENT_MODE && <div className={`${panel === "forum" ? "flex-1" : "w-72 shrink-0"} min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col`}>
         <div className="p-5 border-b border-slate-800/50">
           <div className="flex items-center gap-2 mb-1">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center">
@@ -716,8 +716,8 @@ export default function App() {
         </div>
       </div>}
 
-      {/* Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* Chat Area — hidden when forum tab is active */}
+      {panel !== "forum" && <div className="flex-1 flex flex-col min-w-0">
         <div className="px-6 py-3.5 border-b border-slate-800/50 flex items-center justify-between bg-slate-900/20 shrink-0">
           <div className="flex items-center gap-3">
             <div className={`px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-widest border ${
@@ -787,7 +787,7 @@ export default function App() {
             Input classifier → AI → Output classifier
           </p>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
