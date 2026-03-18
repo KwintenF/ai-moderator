@@ -87,6 +87,9 @@ ${customInstructions ? `Additional instructions: ${customInstructions}` : ""}`;
 }
 
 // ─── API Calls ────────────────────────────────────────────────────────────────
+// Note: video (mp4) classification is not yet supported by the Anthropic API.
+// Image frames could be extracted client-side as a workaround, but native video
+// support is expected in a future API version.
 
 async function callClaude(messages, systemPrompt, maxTokens = 1000) {
   const response = await fetch("/api/anthropic/v1/messages", {
@@ -118,6 +121,34 @@ async function runClassifier(text, mode, blacklist, whitelist, customInstruction
     return JSON.parse(clean);
   } catch {
     return { verdict: "ALLOW", confidence: 0.5, reason: "Classifier parse error — defaulting to allow", category: "appropriate" };
+  }
+}
+
+async function runImageClassifier(imageBase64, mediaType, caption, mode, blacklist, whitelist, customInstructions) {
+  const systemPrompt = buildClassifierPrompt(mode, blacklist, whitelist, customInstructions, "input");
+  try {
+    const response = await fetch("/api/anthropic/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 256,
+        system: systemPrompt,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
+            { type: "text", text: `Classify this image${caption ? ` with caption: "${caption}"` : ""}. Does the visual content violate the moderation rules?` },
+          ],
+        }],
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || "API error");
+    const raw = data.content[0]?.text || "";
+    return JSON.parse(raw.replace(/```json|```/g, "").trim());
+  } catch {
+    return { verdict: "ERROR", confidence: 0, reason: "Classifier error — could not process image", category: "error" };
   }
 }
 
@@ -337,9 +368,11 @@ function AuditLog({ log }) {
 
 function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
   const [posts, setPosts] = useState("");
+  const [images, setImages] = useState([]); // [{ name, caption, base64, mediaType, dataUrl }]
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
   const fileInputRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   const loadFile = (e) => {
     const file = e.target.files[0];
@@ -350,6 +383,29 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
     e.target.value = "";
   };
 
+  const [imageError, setImageError] = useState("");
+
+  const loadImages = (e) => {
+    const files = Array.from(e.target.files);
+    const unsupported = files.filter(f => f.type === "image/svg+xml" || f.name.endsWith(".svg"));
+    if (unsupported.length > 0) {
+      setImageError(`SVG is not supported — convert to PNG first: rsvg-convert -w 800 file.svg -o file.png`);
+      e.target.value = "";
+      return;
+    }
+    setImageError("");
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dataUrl = ev.target.result;
+        const base64 = dataUrl.split(",")[1];
+        setImages(prev => [...prev, { name: file.name, caption: "", base64, mediaType: file.type, dataUrl }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  };
+
   const parsePosts = (raw) => {
     try {
       const json = JSON.parse(raw);
@@ -357,30 +413,45 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
         post: item.post || "",
         author: item.author || null,
         timestamp: item.timestamp || null,
+        type: "text",
       }));
     } catch {
       // not JSON — fall back to --- separated plain text
     }
-    return raw.split("\n---\n").map(p => ({ post: p.trim(), author: null, timestamp: null })).filter(p => p.post);
+    return raw.split("\n---\n").map(p => ({ post: p.trim(), author: null, timestamp: null, type: "text" })).filter(p => p.post);
   };
 
   const classify = async () => {
-    const items = parsePosts(posts);
     setRunning(true);
     const out = [];
-    for (const item of items) {
-      const result = await runClassifier(item.post, mode, blacklist, whitelist, customInstructions, "input");
-      const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      out.push({ ...item, ...result, time });
+    const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    for (const item of parsePosts(posts)) {
+      try {
+        const result = await runClassifier(item.post, mode, blacklist, whitelist, customInstructions, "input");
+        out.push({ ...item, ...result, time });
+      } catch {
+        out.push({ ...item, verdict: "ERROR", confidence: 0, category: "error", reason: "Failed to classify post", time });
+      }
     }
+
+    for (const img of images) {
+      try {
+        const result = await runImageClassifier(img.base64, img.mediaType, img.caption, mode, blacklist, whitelist, customInstructions);
+        out.push({ post: img.caption || img.name, author: null, timestamp: null, type: "image", dataUrl: img.dataUrl, ...result, time });
+      } catch {
+        out.push({ post: img.caption || img.name, author: null, timestamp: null, type: "image", dataUrl: img.dataUrl, verdict: "ERROR", confidence: 0, category: "error", reason: "Failed to classify image", time });
+      }
+    }
+
     setResults(out);
     setRunning(false);
   };
 
   const exportCSV = () => {
-    const header = "verdict,confidence,category,author,timestamp,reason,post";
+    const header = "type,verdict,confidence,category,author,timestamp,reason,post";
     const rows = results.map(r =>
-      `${r.verdict},${r.confidence},${r.category},${r.author || ""},${r.timestamp || ""},"${r.reason.replace(/"/g, '""')}","${r.post.replace(/"/g, '""')}"`
+      `${r.type || "text"},${r.verdict},${r.confidence},${r.category},${r.author || ""},${r.timestamp || ""},"${r.reason.replace(/"/g, '""')}","${r.post.replace(/"/g, '""')}"`
     );
     const csv = [header, ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -392,14 +463,15 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
     URL.revokeObjectURL(url);
   };
 
+  const totalItems = parsePosts(posts).length + images.length;
   const blockedCount = results.filter(r => r.verdict === "BLOCK").length;
 
   return (
     <div className="space-y-4">
       <div>
-        <div className="flex justify-between items-center mb-1">
+        <div className="flex justify-between items-center mb-2">
           <p className="text-[10px] text-slate-500 uppercase tracking-widest">Posts to classify</p>
-          <button onClick={() => fileInputRef.current.click()} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors font-mono">load file</button>
+          <button onClick={() => fileInputRef.current.click()} className="px-3 py-1 text-[10px] font-mono bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-100 rounded-md transition-colors">+ Load file</button>
           <input ref={fileInputRef} type="file" accept=".txt,.json" onChange={loadFile} className="hidden" />
         </div>
         <p className="text-[9px] text-slate-600 mb-2">Separate multiple posts with <span className="text-slate-500 font-mono">---</span> on its own line, or load a <span className="text-slate-500 font-mono">.txt</span> / <span className="text-slate-500 font-mono">.json</span> file</p>
@@ -411,12 +483,41 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
           className="w-full bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none font-mono"
         />
       </div>
+      {/* Image uploads */}
+      <div>
+        <div className="flex justify-between items-center mb-2">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Images</p>
+          <button onClick={() => imageInputRef.current.click()} className="px-3 py-1 text-[10px] font-mono bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-100 rounded-md transition-colors">+ Add images</button>
+          <input ref={imageInputRef} type="file" accept="image/*" multiple onChange={loadImages} className="hidden" />
+        </div>
+        <p className="text-[9px] text-slate-600 mb-2">jpg, png, gif, webp — SVG not supported, convert first</p>
+        {imageError && <p className="text-[9px] text-red-400 font-mono mb-2">{imageError}</p>}
+        {images.length === 0 ? (
+          <p className="text-[9px] text-slate-700 font-mono italic">No images added</p>
+        ) : (
+          <div className="space-y-2">
+            {images.map((img, i) => (
+              <div key={i} className="flex gap-2 items-center bg-slate-900/40 rounded-lg p-2 border border-slate-700/30">
+                <img src={img.dataUrl} alt="" className="w-10 h-10 object-cover rounded shrink-0" />
+                <input
+                  value={img.caption}
+                  onChange={e => setImages(prev => prev.map((im, j) => j === i ? { ...im, caption: e.target.value } : im))}
+                  placeholder="Optional caption..."
+                  className="flex-1 bg-transparent text-[10px] text-slate-300 placeholder-slate-600 focus:outline-none font-mono"
+                />
+                <button onClick={() => setImages(prev => prev.filter((_, j) => j !== i))} className="text-slate-700 hover:text-slate-400 text-[10px]">x</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <button
         onClick={classify}
-        disabled={running || !posts.trim()}
+        disabled={running || (totalItems === 0)}
         className="w-full py-2 text-[10px] uppercase tracking-widest bg-violet-900/40 border border-violet-700/40 text-violet-300 hover:bg-violet-900/60 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
       >
-        {running ? "Classifying..." : (() => { const n = parsePosts(posts).length; return `Classify${n > 1 ? ` (${n} posts)` : ""}`; })()}
+        {running ? "Classifying..." : `Classify${totalItems > 1 ? ` (${totalItems} items)` : ""}`}
       </button>
 
       {results.length > 0 && (
@@ -439,16 +540,22 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
           </div>
           <div className="space-y-2">
             {results.map((r, i) => (
-              <div key={i} className={`rounded-lg p-2.5 border text-[10px] font-mono ${r.verdict === "BLOCK" ? "bg-red-950/30 border-red-800/30" : "bg-slate-800/30 border-slate-700/20"}`}>
+              <div key={i} className={`rounded-lg p-2.5 border text-[10px] font-mono ${
+                r.verdict === "BLOCK" ? "bg-red-950/30 border-red-800/30" :
+                r.verdict === "ERROR" ? "bg-amber-950/30 border-amber-800/30" :
+                "bg-slate-800/30 border-slate-700/20"}`}>
                 <div className="flex justify-between mb-1">
-                  <span className={r.verdict === "BLOCK" ? "text-red-400" : "text-emerald-400"}>{r.verdict}</span>
-                  <span className="text-slate-600">{r.category} · {r.time}</span>
+                  <span className={r.verdict === "BLOCK" ? "text-red-400" : r.verdict === "ERROR" ? "text-amber-400" : "text-emerald-400"}>{r.verdict}</span>
+                  <span className="text-slate-600">{r.type === "image" ? "image · " : ""}{r.category} · {r.time}</span>
                 </div>
                 {(r.author || r.timestamp) && (
                   <div className="flex gap-2 mb-1">
                     {r.author && <span className="text-violet-400">{r.author}</span>}
                     {r.timestamp && <span className="text-slate-600">{new Date(r.timestamp).toLocaleString()}</span>}
                   </div>
+                )}
+                {r.type === "image" && r.dataUrl && (
+                  <img src={r.dataUrl} alt="" className="w-16 h-16 object-cover rounded mb-1" />
                 )}
                 <p className="text-slate-500 truncate">"{r.post.slice(0, 60)}{r.post.length > 60 ? "..." : ""}"</p>
                 <p className="text-slate-600 mt-0.5 italic">{r.reason}</p>

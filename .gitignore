@@ -2,6 +2,14 @@
 .env
 .env.local
 
+# Test images — download locally using URLs in test-forums/images-to-test.md
+test-forums/*.jpg
+test-forums/*.JPG
+test-forums/*.png
+test-forums/*.PNG
+test-forums/*.gif
+test-forums/*.webp
+
 # Logs
 logs
 *.log
