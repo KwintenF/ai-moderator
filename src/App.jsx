@@ -333,6 +333,135 @@ function AuditLog({ log }) {
   );
 }
 
+// ─── Forum Moderator ──────────────────────────────────────────────────────────
+
+function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
+  const [posts, setPosts] = useState("");
+  const [results, setResults] = useState([]);
+  const [running, setRunning] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const loadFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setPosts(ev.target.result);
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const parsePosts = (raw) => {
+    try {
+      const json = JSON.parse(raw);
+      if (Array.isArray(json)) return json.map(item => ({
+        post: item.post || "",
+        author: item.author || null,
+        timestamp: item.timestamp || null,
+      }));
+    } catch {
+      // not JSON — fall back to --- separated plain text
+    }
+    return raw.split("\n---\n").map(p => ({ post: p.trim(), author: null, timestamp: null })).filter(p => p.post);
+  };
+
+  const classify = async () => {
+    const items = parsePosts(posts);
+    setRunning(true);
+    const out = [];
+    for (const item of items) {
+      const result = await runClassifier(item.post, mode, blacklist, whitelist, customInstructions, "input");
+      const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      out.push({ ...item, ...result, time });
+    }
+    setResults(out);
+    setRunning(false);
+  };
+
+  const exportCSV = () => {
+    const header = "verdict,confidence,category,author,timestamp,reason,post";
+    const rows = results.map(r =>
+      `${r.verdict},${r.confidence},${r.category},${r.author || ""},${r.timestamp || ""},"${r.reason.replace(/"/g, '""')}","${r.post.replace(/"/g, '""')}"`
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "moderation-log.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const blockedCount = results.filter(r => r.verdict === "BLOCK").length;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="flex justify-between items-center mb-1">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Posts to classify</p>
+          <button onClick={() => fileInputRef.current.click()} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors font-mono">load file</button>
+          <input ref={fileInputRef} type="file" accept=".txt,.json" onChange={loadFile} className="hidden" />
+        </div>
+        <p className="text-[9px] text-slate-600 mb-2">Separate multiple posts with <span className="text-slate-500 font-mono">---</span> on its own line, or load a <span className="text-slate-500 font-mono">.txt</span> / <span className="text-slate-500 font-mono">.json</span> file</p>
+        <textarea
+          value={posts}
+          onChange={e => setPosts(e.target.value)}
+          placeholder={"Post 1 text...\n---\nPost 2 text...\n---\nPost 3 text..."}
+          rows={6}
+          className="w-full bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-600 focus:outline-none focus:border-slate-500 resize-none font-mono"
+        />
+      </div>
+      <button
+        onClick={classify}
+        disabled={running || !posts.trim()}
+        className="w-full py-2 text-[10px] uppercase tracking-widest bg-violet-900/40 border border-violet-700/40 text-violet-300 hover:bg-violet-900/60 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+      >
+        {running ? "Classifying..." : (() => { const n = parsePosts(posts).length; return `Classify${n > 1 ? ` (${n} posts)` : ""}`; })()}
+      </button>
+
+      {results.length > 0 && (
+        <div>
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-[10px] text-slate-500 uppercase tracking-widest">Results</p>
+            <button onClick={exportCSV} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors font-mono">export CSV</button>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 mb-3">
+            {[
+              { label: "Total", value: results.length, color: "text-slate-300" },
+              { label: "Blocked", value: blockedCount, color: "text-red-400" },
+              { label: "Passed", value: results.length - blockedCount, color: "text-emerald-400" },
+            ].map(s => (
+              <div key={s.label} className="bg-slate-800/40 rounded-lg p-2 border border-slate-700/30 text-center">
+                <div className={`text-base font-bold ${s.color}`}>{s.value}</div>
+                <div className="text-[9px] text-slate-600">{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-2">
+            {results.map((r, i) => (
+              <div key={i} className={`rounded-lg p-2.5 border text-[10px] font-mono ${r.verdict === "BLOCK" ? "bg-red-950/30 border-red-800/30" : "bg-slate-800/30 border-slate-700/20"}`}>
+                <div className="flex justify-between mb-1">
+                  <span className={r.verdict === "BLOCK" ? "text-red-400" : "text-emerald-400"}>{r.verdict}</span>
+                  <span className="text-slate-600">{r.category} · {r.time}</span>
+                </div>
+                {(r.author || r.timestamp) && (
+                  <div className="flex gap-2 mb-1">
+                    {r.author && <span className="text-violet-400">{r.author}</span>}
+                    {r.timestamp && <span className="text-slate-600">{new Date(r.timestamp).toLocaleString()}</span>}
+                  </div>
+                )}
+                <p className="text-slate-500 truncate">"{r.post.slice(0, 60)}{r.post.length > 60 ? "..." : ""}"</p>
+                <p className="text-slate-600 mt-0.5 italic">{r.reason}</p>
+                <ConfidenceBar value={r.confidence} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -458,7 +587,7 @@ export default function App() {
 
         {/* Tabs */}
         <div className="flex border-b border-slate-800/50">
-          {["config", "audit", "info"].map((p) => (
+          {["config", "audit", "forum", "info"].map((p) => (
             <button key={p} onClick={() => setPanel(p)}
               className={`flex-1 py-2.5 text-[10px] uppercase tracking-widest transition-colors relative ${panel === p ? "text-slate-200" : "text-slate-600 hover:text-slate-400"}`}>
               {p}
@@ -502,7 +631,25 @@ export default function App() {
             <div>
               <div className="flex justify-between items-center mb-3">
                 <p className="text-[10px] text-slate-500 uppercase tracking-widest">Classification Log</p>
-                <button onClick={() => setAuditLog([])} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors">clear</button>
+                <div className="flex gap-2">
+                  {auditLog.length > 0 && (
+                    <button onClick={() => {
+                      const header = "stage,verdict,confidence,category,reason,text,time";
+                      const rows = auditLog.map(e =>
+                        `${e.stage},${e.verdict},${e.confidence},${e.category},"${e.reason.replace(/"/g, '""')}","${e.text.replace(/"/g, '""')}",${e.time}`
+                      );
+                      const csv = [header, ...rows].join("\n");
+                      const blob = new Blob([csv], { type: "text/csv" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = "chat-audit-log.csv";
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors font-mono">export CSV</button>
+                  )}
+                  <button onClick={() => setAuditLog([])} className="text-[9px] text-slate-600 hover:text-slate-400 transition-colors">clear</button>
+                </div>
               </div>
               <div className="grid grid-cols-3 gap-1.5 mb-3">
                 {[
@@ -518,6 +665,15 @@ export default function App() {
               </div>
               <AuditLog log={auditLog} />
             </div>
+          )}
+
+          {panel === "forum" && (
+            <ForumModerator
+              mode={mode}
+              blacklist={blacklist}
+              whitelist={whitelist}
+              customInstructions={customInstructions}
+            />
           )}
 
           {panel === "info" && (
