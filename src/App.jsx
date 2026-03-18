@@ -4,12 +4,29 @@ import { useState, useRef, useEffect } from "react";
 
 const MODES = { BLACKLIST: "blacklist", WHITELIST: "whitelist" };
 
-const DEFAULT_BLACKLIST = ["violence", "adult content", "drugs", "weapons", "hacking"];
-const DEFAULT_WHITELIST = [
-  "math", "science", "history", "literature", "geography", "grammar",
-  "biology", "chemistry", "physics", "algebra", "geometry",
-  "programming basics", "reading", "writing", "essays",
-];
+const VALID_MODES = ["student", "teacher"];
+const APP_MODE = VALID_MODES.includes(import.meta.env.VITE_MODE)
+  ? import.meta.env.VITE_MODE
+  : "teacher";
+const IS_STUDENT_MODE = APP_MODE === "student";
+
+const DEFAULT_BLACKLIST = import.meta.env.VITE_BLACKLIST
+  ? import.meta.env.VITE_BLACKLIST.split(",").map(t => t.trim())
+  : ["violence", "adult content", "drugs", "weapons", "hacking"];
+
+const DEFAULT_WHITELIST = import.meta.env.VITE_WHITELIST
+  ? import.meta.env.VITE_WHITELIST.split(",").map(t => t.trim())
+  : [
+      "math", "science", "history", "literature", "geography", "grammar",
+      "biology", "chemistry", "physics", "algebra", "geometry",
+      "programming basics", "reading", "writing", "essays",
+    ];
+
+const DEFAULT_MODE = import.meta.env.VITE_MODERATION_MODE === "blacklist"
+  ? MODES.BLACKLIST
+  : MODES.WHITELIST;
+
+const DEFAULT_CUSTOM_INSTRUCTIONS = import.meta.env.VITE_CUSTOM_INSTRUCTIONS || "";
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────
 
@@ -76,9 +93,6 @@ async function callClaude(messages, systemPrompt, maxTokens = 1000) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
@@ -322,10 +336,10 @@ function AuditLog({ log }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [mode, setMode] = useState(MODES.WHITELIST);
+  const [mode, setMode] = useState(DEFAULT_MODE);
   const [blacklist, setBlacklist] = useState(DEFAULT_BLACKLIST);
   const [whitelist, setWhitelist] = useState(DEFAULT_WHITELIST);
-  const [customInstructions, setCustomInstructions] = useState("");
+  const [customInstructions, setCustomInstructions] = useState(DEFAULT_CUSTOM_INSTRUCTIONS);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [pipelineStage, setPipelineStage] = useState(null);
@@ -411,8 +425,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex" style={{ fontFamily: "'DM Mono', monospace" }}>
 
-      {/* Sidebar */}
-      <div className="w-72 min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col shrink-0">
+      {/* Sidebar — hidden in student mode */}
+      {!IS_STUDENT_MODE && <div className="w-72 min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col shrink-0">
         <div className="p-5 border-b border-slate-800/50">
           <div className="flex items-center gap-2 mb-1">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center">
@@ -544,7 +558,7 @@ export default function App() {
             Clear conversation
           </button>
         </div>
-      </div>
+      </div>}
 
       {/* Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
