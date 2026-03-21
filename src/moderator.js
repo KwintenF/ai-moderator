@@ -108,12 +108,24 @@ export const MODELS = [
     moderatorFormat: "llm",
   },
   {
+    key: "wildguard",
+    label: "WildGuard",
+    modelId: "allenai/wildguard",
+    provider: "AllenAI (RunPod)",
+    format: "openai",
+    endpoint: "/api/runpod",
+    canChat: false,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "wildguard",
+  },
+  {
     key: "shieldgemma-9b",
     label: "ShieldGemma 9B",
     modelId: "google/shieldgemma-9b",
     provider: "Google (RunPod)",
     format: "openai",
-    endpoint: "/api/runpod/v1/chat/completions",
+    endpoint: "/api/runpod",
     canChat: false,
     canModerate: true,
     canModerateImage: false,
@@ -125,7 +137,7 @@ export const MODELS = [
     modelId: "Qwen/Qwen2-VL-7B-Instruct",
     provider: "Alibaba (RunPod)",
     format: "openai",
-    endpoint: "/api/runpod/v1/chat/completions",
+    endpoint: "/api/runpod",
     canChat: true,
     canModerate: true,
     canModerateImage: true,
@@ -238,7 +250,48 @@ ${customInstructions ? `Additional instructions: ${customInstructions}` : ""}`;
 
 // ─── API Calls ────────────────────────────────────────────────────────────────
 
+// RunPod serverless uses a raw job API (/runsync) rather than OpenAI-compatible endpoints.
+// Wraps the request in {"input": {...}} and reads the result from output[0].choices[0].tokens[0].
+async function callRunpodRaw(model, messages, systemPrompt, maxTokens) {
+  // Use prompt field with raw text when the message content already contains
+  // explicit [INST] tags (WildGuard). Otherwise use messages format.
+  const firstContent = messages[0]?.content ?? "";
+  const usesRawPrompt = typeof firstContent === "string" && firstContent.startsWith("<s>[INST]");
+  const input = usesRawPrompt
+    ? { prompt: firstContent, max_tokens: maxTokens }
+    : {
+        messages: systemPrompt
+          ? [{ role: "system", content: systemPrompt }, ...messages]
+          : messages,
+        max_tokens: maxTokens,
+      };
+  logger.api("callRunpodRaw →", model.key, "| endpoint:", model.endpoint);
+  const response = await fetch(model.endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input }),
+  });
+  const rawText = await response.text();
+  if (!response.ok) {
+    logger.api("callRunpodRaw error:", rawText.slice(0, 300));
+    throw new Error(`RunPod error ${response.status}: ${rawText.slice(0, 200)}`);
+  }
+  let data;
+  try { data = JSON.parse(rawText); } catch {
+    logger.api("callRunpodRaw JSON parse failed:", rawText.slice(0, 200));
+    throw new Error("Invalid JSON from RunPod");
+  }
+  const choice = data?.output?.[0]?.choices?.[0];
+  const text = choice?.tokens?.[0] ?? choice?.text ?? choice?.message?.content ?? "";
+  logger.api("callRunpodRaw result:", text.slice(0, 80));
+  return text;
+}
+
 export async function callModel(model, messages, systemPrompt, maxTokens = 1000) {
+  if (model.endpoint === "/api/runpod") {
+    return callRunpodRaw(model, messages, systemPrompt, maxTokens);
+  }
+
   const body = model.format === "anthropic"
     ? { model: model.modelId, max_tokens: maxTokens, system: systemPrompt, messages }
     : { model: model.modelId, max_tokens: maxTokens, messages: [{ role: "system", content: systemPrompt }, ...messages] };
@@ -253,16 +306,69 @@ export async function callModel(model, messages, systemPrompt, maxTokens = 1000)
 
   logger.api("callModel ←", model.key, "| status:", response.status);
 
-  const data = await response.json();
+  const rawText = await response.text();
   if (!response.ok) {
-    logger.api("callModel error:", data);
-    throw new Error(data.error?.message || "API error");
+    logger.api("callModel error raw:", rawText.slice(0, 300));
+    let message = "API error";
+    try { message = JSON.parse(rawText)?.error?.message || message; } catch { message = rawText.slice(0, 200); }
+    throw new Error(message);
+  }
+  let data;
+  try { data = JSON.parse(rawText); } catch {
+    logger.api("callModel JSON parse failed, raw:", rawText.slice(0, 200));
+    throw new Error("Invalid JSON response from model");
   }
   const text = model.format === "anthropic"
     ? data.content[0]?.text || ""
     : data.choices[0]?.message?.content || "";
   logger.api("callModel result:", text.slice(0, 80));
   return text;
+}
+
+// WildGuard uses a fixed classifier prompt and returns three lines:
+//   Harmful request: yes/no/N/A
+//   Response refusal: yes/no/N/A
+//   Harmful response: yes/no/N/A
+// For input classification only the user message is provided.
+// For output classification both sides are provided for best accuracy.
+// Note: uses fixed safety categories — cannot enforce custom whitelists.
+function buildWildGuardPrompt(target, text, userMessage = null) {
+  const instruction = "You are a classifier for analyzing interactions between humans and LLMs. Given a request from a human user and a response from an LLM assistant, determine 1) whether the human user's request is harmful, 2) whether the AI assistant's response to the user's request is harmful, and 3) whether the AI assistant refused to respond to the user's request. Output your verdict in the following format:";
+
+  const human = target === "input"  ? text : (userMessage ?? "");
+  const ai    = target === "output" ? text : "";
+
+  // WildGuard requires the raw Mistral completion format — the chat template
+  // wrapping adds a second [INST] layer that breaks the model's output.
+  return `<s>[INST] ${instruction}\n\nHuman user:\n${human || "[N/A]"}\n\nAI assistant:\n${ai || "[N/A]"}\n\n--- [/INST]`;
+}
+
+function parseWildGuardResponse(raw, target) {
+  const lines = raw.toLowerCase();
+  const get = (key) => {
+    const match = lines.match(new RegExp(`${key}:\\s*(yes|no|n\\/a)`));
+    return match?.[1] ?? "n/a";
+  };
+
+  const harmfulRequest  = get("harmful request");
+  const harmfulResponse = get("harmful response");
+  const refusal         = get("response refusal");
+
+  const isViolation = target === "input"
+    ? harmfulRequest === "yes"
+    : harmfulResponse === "yes";
+
+  logger.mod("parseWildGuardResponse:", { harmfulRequest, harmfulResponse, refusal, target });
+
+  return {
+    verdict: isViolation ? "BLOCK" : "ALLOW",
+    confidence: null,
+    confidenceEstimated: true,
+    reason: target === "input"
+      ? `Harmful request: ${harmfulRequest}`
+      : `Harmful response: ${harmfulResponse} | Refusal: ${refusal}`,
+    category: isViolation ? "harmful" : "appropriate",
+  };
 }
 
 // Calls Mistral's dedicated /v1/moderations endpoint and maps the response
@@ -302,13 +408,19 @@ async function callMistralModeration(model, text) {
 export async function runClassifier(model, text, mode, blacklist, whitelist, customInstructions, target) {
   logger.mod("runClassifier →", model.key, "| target:", target, "| text:", text.slice(0, 60));
 
+  if (model.moderatorFormat === "wildguard") {
+    const prompt = buildWildGuardPrompt(target, text);
+    const raw = await callModel(model, [{ role: "user", content: prompt }], "", 64);
+    return parseWildGuardResponse(raw, target);
+  }
+
   if (model.moderatorFormat === "mistral-moderation") {
     return await callMistralModeration(model, text);
   }
 
   if (model.moderatorFormat === "shieldgemma") {
     const prompt = buildShieldGemmaPrompt(mode, blacklist, whitelist, customInstructions, target, text);
-    const raw = await callModel(model, [{ role: "user", content: prompt }], "", 256);
+    const raw = await callModel(model, [{ role: "user", content: prompt }], "", 512);
     const result = parseShieldGemmaResponse(raw);
     logger.mod("runClassifier ← shieldgemma:", result.verdict, result.reason.slice(0, 60));
     return result;
@@ -319,13 +431,29 @@ export async function runClassifier(model, text, mode, blacklist, whitelist, cus
     model,
     [{ role: "user", content: `Classify this ${target === "input" ? "student message" : "AI response"}:\n\n"${text}"` }],
     systemPrompt,
-    256
+    512
   );
   try {
-    const result = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON object found");
+    const result = JSON.parse(jsonMatch[0]);
     logger.mod("runClassifier ← llm:", result.verdict, result.reason?.slice(0, 60));
     return result;
   } catch {
+    // Truncated response — try to salvage verdict and confidence from partial JSON
+    const verdictMatch  = raw.match(/"verdict"\s*:\s*"(ALLOW|BLOCK)"/);
+    const confidenceMatch = raw.match(/"confidence"\s*:\s*([0-9.]+)/);
+    const reasonMatch   = raw.match(/"reason"\s*:\s*"([^"]{0,200})/);
+    if (verdictMatch) {
+      const salvaged = {
+        verdict:    verdictMatch[1],
+        confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) : 0.8,
+        reason:     reasonMatch ? reasonMatch[1] + "…" : "Response truncated",
+        category:   verdictMatch[1] === "BLOCK" ? "blocked-topic" : "appropriate",
+      };
+      logger.mod("runClassifier salvaged from truncated response:", salvaged.verdict);
+      return salvaged;
+    }
     logger.mod("runClassifier parse error, raw:", raw.slice(0, 100));
     return { verdict: "ALLOW", confidence: 0.5, reason: "Classifier parse error — defaulting to allow", category: "appropriate" };
   }
@@ -349,7 +477,9 @@ export async function runImageClassifier(model, imageBase64, mediaType, caption,
       systemPrompt,
       256
     );
-    return JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON object found");
+    return JSON.parse(jsonMatch[0]);
   } catch {
     return { verdict: "ERROR", confidence: 0, reason: "Classifier error — could not process image", category: "error" };
   }

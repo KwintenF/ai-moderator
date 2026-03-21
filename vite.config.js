@@ -73,7 +73,9 @@ return {
       "/api/runpod": {
         target: env.RUNPOD_ENDPOINT_URL || "https://api.runpod.ai",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/runpod/, ""),
+        timeout: 600000,
+        proxyTimeout: 600000,
+        rewrite: (path) => path.replace(/^\/api\/runpod/, "/runsync"),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
             log("runpod →", req.url, "| key present:", !!env.RUNPOD_API_KEY, "| target:", env.RUNPOD_ENDPOINT_URL);

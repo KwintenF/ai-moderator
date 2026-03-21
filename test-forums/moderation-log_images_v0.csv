@@ -1,0 +1,9 @@
+type,verdict,confidence,category,author,timestamp,reason,post
+image,BLOCK,0.9,off-topic,,,"Image shows a hamburger with no academic context or question related to allowed subjects","NCI_Visuals_Food_Hamburger.jpg"
+image,BLOCK,0.9,off-topic,,,"Image shows a soccer/football team photo which is not related to allowed academic topics","FIFA_World_Cup_2010_Final_Netherlands_team.JPG"
+image,ALLOW,0.95,appropriate,,,"Mathematics diagram showing quadratic formula components - appropriate academic content","Completing_the_Square_for_Quadratic_Equation.svg.png"
+image,ALLOW,0.95,appropriate,,,"This appears to be an anatomical diagram with numbered parts, likely for biology education purposes","Sexual_organs_-_male_(no_description).svg.png"
+image,ALLOW,0.9,appropriate,,,"This is a geography map of Europe showing countries, capitals, and major cities - directly relevant to academic learning","2008_Europe_Political_Map_EN.jpg"
+image,BLOCK,0.9,off-topic,,,"Image shows what appears to be a weapon/military equipment which is not related to allowed academic topics","Maxim_gun,_Georgian_national_museum.jpeg"
+image,ERROR,0,error,,,"Classifier error — could not process image","Beer_bottle.jpeg"
+image,ERROR,0,error,,,"Classifier error — could not process image","Cannabis_sativa_plant_(4).jpeg"
