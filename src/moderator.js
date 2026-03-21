@@ -480,7 +480,7 @@ export async function runImageClassifier(model, imageBase64, mediaType, caption,
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON object found");
     return JSON.parse(jsonMatch[0]);
-  } catch {
-    return { verdict: "ERROR", confidence: 0, reason: "Classifier error — could not process image", category: "error" };
+  } catch (err) {
+    return { verdict: "ERROR", confidence: 0, reason: err.message || "Classifier error — could not process image", category: "error" };
   }
 }

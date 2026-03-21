@@ -329,8 +329,8 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
       try {
         const result = await runClassifier(textModeratorModel, item.post, mode, blacklist, whitelist, customInstructions, "input");
         out.push({ ...item, ...result, time });
-      } catch {
-        out.push({ ...item, verdict: "ERROR", confidence: 0, category: "error", reason: "Failed to classify post", time });
+      } catch (err) {
+        out.push({ ...item, verdict: "ERROR", confidence: 0, category: "error", reason: err.message || "Failed to classify post", time });
       }
     }
 
@@ -338,8 +338,8 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
       try {
         const result = await runImageClassifier(imageModeratorModel, img.base64, img.mediaType, img.caption, mode, blacklist, whitelist, customInstructions);
         out.push({ post: img.caption || img.name, author: null, timestamp: null, type: "image", dataUrl: img.dataUrl, ...result, time });
-      } catch {
-        out.push({ post: img.caption || img.name, author: null, timestamp: null, type: "image", dataUrl: img.dataUrl, verdict: "ERROR", confidence: 0, category: "error", reason: "Failed to classify image", time });
+      } catch (err) {
+        out.push({ post: img.caption || img.name, author: null, timestamp: null, type: "image", dataUrl: img.dataUrl, verdict: "ERROR", confidence: 0, category: "error", reason: err.message || "Failed to classify image", time });
       }
     }
 
