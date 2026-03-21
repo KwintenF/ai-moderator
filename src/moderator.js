@@ -1,3 +1,5 @@
+import logger from "./logger.js";
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 export const MODES = { BLACKLIST: "blacklist", WHITELIST: "whitelist" };
@@ -7,7 +9,14 @@ export const MODES = { BLACKLIST: "blacklist", WHITELIST: "whitelist" };
 //   canChat          — can generate assistant replies
 //   canModerate      — can classify text (input or output)
 //   canModerateImage — can classify images
-//   moderatorFormat  — "llm" (returns JSON) or "shieldgemma" (returns Yes/No)
+//   moderatorFormat  — "llm"                (chat model, returns JSON verdict)
+//                      "shieldgemma"        (returns Yes/No + reasoning)
+//                      "mistral-moderation" (dedicated /v1/moderations endpoint, returns category scores)
+//                      "wildguard"          (returns structured harmful/unharmful verdict)
+//
+// Note: mistral-moderation uses fixed safety categories and cannot enforce
+// custom whitelists. Best used as the safety layer in blacklist mode, or
+// alongside an LLM moderator in whitelist mode.
 //
 // Note: video (mp4) classification is not yet supported by any of these APIs.
 // Image frames could be extracted client-side as a workaround, but native video
@@ -57,6 +66,42 @@ export const MODELS = [
     provider: "Mistral",
     format: "openai",
     endpoint: "/api/mistral/v1/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: true,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "mistral-moderation",
+    label: "Mistral Moderation",
+    modelId: "mistral-moderation-latest",
+    provider: "Mistral",
+    format: "openai",
+    endpoint: "/api/mistral/v1/moderations",
+    canChat: false,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "mistral-moderation",
+  },
+  {
+    key: "gemini-3-flash-free",
+    label: "Gemini 3 Flash (free)",
+    modelId: "gemini-3-flash-preview",
+    provider: "Google",
+    format: "openai",
+    endpoint: "/api/google/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: true,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "gemini-2-flash",
+    label: "Gemini 2.0 Flash (paid)",
+    modelId: "gemini-2.0-flash",
+    provider: "Google",
+    format: "openai",
+    endpoint: "/api/google/chat/completions",
     canChat: true,
     canModerate: true,
     canModerateImage: true,
@@ -198,23 +243,75 @@ export async function callModel(model, messages, systemPrompt, maxTokens = 1000)
     ? { model: model.modelId, max_tokens: maxTokens, system: systemPrompt, messages }
     : { model: model.modelId, max_tokens: maxTokens, messages: [{ role: "system", content: systemPrompt }, ...messages] };
 
+  logger.api("callModel →", model.key, "| endpoint:", model.endpoint, "| maxTokens:", maxTokens);
+
   const response = await fetch(model.endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+
+  logger.api("callModel ←", model.key, "| status:", response.status);
+
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error?.message || "API error");
-  return model.format === "anthropic"
+  if (!response.ok) {
+    logger.api("callModel error:", data);
+    throw new Error(data.error?.message || "API error");
+  }
+  const text = model.format === "anthropic"
     ? data.content[0]?.text || ""
     : data.choices[0]?.message?.content || "";
+  logger.api("callModel result:", text.slice(0, 80));
+  return text;
+}
+
+// Calls Mistral's dedicated /v1/moderations endpoint and maps the response
+// to our standard { verdict, confidence, reason, category } shape.
+// Uses Mistral's own boolean thresholds for the verdict; exposes the
+// highest-scoring category score as confidence.
+async function callMistralModeration(model, text) {
+  logger.api("callMistralModeration →", model.endpoint);
+  const response = await fetch(model.endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: model.modelId, input: text }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || "Moderation API error");
+
+  const result = data.results?.[0];
+  if (!result) throw new Error("Empty moderation response");
+
+  const scores = result.category_scores;
+  const [topCategory, topScore] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+  const isViolation = Object.values(result.categories).some(Boolean);
+
+  logger.api("callMistralModeration ←", isViolation ? "BLOCK" : "ALLOW", topCategory, topScore);
+
+  return {
+    verdict: isViolation ? "BLOCK" : "ALLOW",
+    confidence: topScore,
+    reason: isViolation
+      ? `Flagged: ${topCategory.replace(/_/g, " ")} (${Math.round(topScore * 100)}%)`
+      : "No policy violations detected",
+    category: isViolation ? topCategory.replace(/_/g, "-") : "appropriate",
+    categoryScores: scores,
+  };
 }
 
 export async function runClassifier(model, text, mode, blacklist, whitelist, customInstructions, target) {
+  logger.mod("runClassifier →", model.key, "| target:", target, "| text:", text.slice(0, 60));
+
+  if (model.moderatorFormat === "mistral-moderation") {
+    return await callMistralModeration(model, text);
+  }
+
   if (model.moderatorFormat === "shieldgemma") {
     const prompt = buildShieldGemmaPrompt(mode, blacklist, whitelist, customInstructions, target, text);
     const raw = await callModel(model, [{ role: "user", content: prompt }], "", 256);
-    return parseShieldGemmaResponse(raw);
+    const result = parseShieldGemmaResponse(raw);
+    logger.mod("runClassifier ← shieldgemma:", result.verdict, result.reason.slice(0, 60));
+    return result;
   }
 
   const systemPrompt = buildClassifierPrompt(mode, blacklist, whitelist, customInstructions, target);
@@ -225,8 +322,11 @@ export async function runClassifier(model, text, mode, blacklist, whitelist, cus
     256
   );
   try {
-    return JSON.parse(raw.replace(/```json|```/g, "").trim());
+    const result = JSON.parse(raw.replace(/```json|```/g, "").trim());
+    logger.mod("runClassifier ← llm:", result.verdict, result.reason?.slice(0, 60));
+    return result;
   } catch {
+    logger.mod("runClassifier parse error, raw:", raw.slice(0, 100));
     return { verdict: "ALLOW", confidence: 0.5, reason: "Classifier parse error — defaulting to allow", category: "appropriate" };
   }
 }

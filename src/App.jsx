@@ -464,6 +464,17 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
                 <p className="text-slate-500 truncate">"{r.post.slice(0, 60)}{r.post.length > 60 ? "..." : ""}"</p>
                 <p className="text-slate-600 mt-0.5 italic">{r.reason}</p>
                 {!r.confidenceEstimated && <ConfidenceBar value={r.confidence} />}
+                {r.categoryScores && (
+                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                    {Object.entries(r.categoryScores)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([cat, score]) => (
+                        <span key={cat} className={`text-[8px] font-mono ${score > 0.1 ? "text-amber-400" : "text-slate-600"}`}>
+                          {cat.replace(/_/g, " ")}: {Math.round(score * 100)}%
+                        </span>
+                      ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
