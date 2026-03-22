@@ -104,7 +104,9 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
 
   // persist whenever results change
   useEffect(() => {
-    if (results) localStorage.setItem(STORAGE_KEY, JSON.stringify(results));
+    if (results) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(results)); } catch {}
+    }
   }, [results]);
 
   // ── load ETHOS on mount / when source switches to ethos
@@ -205,8 +207,10 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
           if (abortRef.current) throw new Error("Aborted");
         }
       );
-    } catch {
-      // Aborted — partial progress already saved, leave it for resume
+    } catch (err) {
+      // "Aborted" is expected when the user clicks Stop — leave progress for resume.
+      // Any other error is unexpected: log it so it's visible in the console.
+      if (err?.message !== "Aborted") console.error("Benchmark run failed:", err);
       setRunning(false);
       return;
     }
@@ -253,7 +257,7 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
     if (!results) return;
     const modelObjs = results.models.map(m => MODERATOR_MODELS.find(x => x.key === m.key) ?? m);
     const csv = exportResultsCSV(results.rows, modelObjs, results.promptConfig);
-    const ts  = new Date(results.runAt).toISOString().slice(0, 16).replace(/[T:]/g, "-");
+    const ts  = new Date(results.startedAt).toISOString().slice(0, 16).replace(/[T:]/g, "-");
     const a   = document.createElement("a");
     a.href    = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     a.download = `benchmark_${ts}.csv`;
@@ -478,7 +482,7 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
                 <p className="text-[9px] text-slate-500 uppercase tracking-widest">Results</p>
                 <p className="text-[10px] text-slate-600">
                   {results.rows.length} rows &mdash; {results.dataset} &mdash;{" "}
-                  {new Date(results.runAt).toLocaleString()}
+                  {new Date(results.startedAt).toLocaleString()}
                 </p>
               </div>
               <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${results.models.length}, minmax(0,1fr))` }}>
