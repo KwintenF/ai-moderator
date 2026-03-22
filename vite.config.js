@@ -70,6 +70,34 @@ return {
           });
         },
       },
+      "/api/xai": {
+        target: "https://api.x.ai",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/xai/, "/v1"),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            log("xai →", req.url, "| key present:", !!env.XAI_API_KEY);
+            proxyReq.setHeader("Authorization", `Bearer ${env.XAI_API_KEY}`);
+          });
+          proxy.on("proxyRes", (proxyRes, req) => {
+            log("xai ←", req.url, "| status:", proxyRes.statusCode);
+          });
+        },
+      },
+      "/api/groq": {
+        target: "https://api.groq.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/groq/, "/openai/v1"),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            log("groq →", req.url, "| key present:", !!env.GROQ_API_KEY);
+            proxyReq.setHeader("Authorization", `Bearer ${env.GROQ_API_KEY}`);
+          });
+          proxy.on("proxyRes", (proxyRes, req) => {
+            log("groq ←", req.url, "| status:", proxyRes.statusCode);
+          });
+        },
+      },
       "/api/runpod": {
         target: env.RUNPOD_ENDPOINT_URL || "https://api.runpod.ai",
         changeOrigin: true,

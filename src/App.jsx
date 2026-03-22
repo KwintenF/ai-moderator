@@ -5,6 +5,7 @@ import {
   buildAssistantSystemPrompt,
   callModel, runClassifier, runImageClassifier,
 } from "./moderator.js";
+import BenchmarkTab from "./BenchmarkTab.jsx";
 
 function ModelDropdown({ label, current, setter, pool }) {
   return (
@@ -581,7 +582,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex" style={{ fontFamily: "'DM Mono', monospace" }}>
 
       {/* Sidebar — hidden in student mode */}
-      {!IS_STUDENT_MODE && <div className={`${panel === "forum" ? "flex-1" : "w-72 shrink-0"} min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col`}>
+      {!IS_STUDENT_MODE && <div className={`${panel === "forum" || panel === "benchmark" ? "flex-1" : "w-72 shrink-0"} min-h-screen bg-slate-900/50 border-r border-slate-800/50 flex flex-col`}>
         <div className="p-5 border-b border-slate-800/50">
           <div className="flex items-center gap-2 mb-1">
             <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center">
@@ -613,7 +614,7 @@ export default function App() {
 
         {/* Tabs */}
         <div className="flex border-b border-slate-800/50">
-          {["config", "audit", "forum", "info"].map((p) => (
+          {["config", "audit", "forum", "benchmark", "info"].map((p) => (
             <button key={p} onClick={() => setPanel(p)}
               className={`flex-1 py-2.5 text-[10px] uppercase tracking-widest transition-colors relative ${panel === p ? "text-slate-200" : "text-slate-600 hover:text-slate-400"}`}>
               {p}
@@ -709,6 +710,15 @@ export default function App() {
             />
           )}
 
+          {panel === "benchmark" && (
+            <BenchmarkTab
+              mode={mode}
+              blacklist={blacklist}
+              whitelist={whitelist}
+              customInstructions={customInstructions}
+            />
+          )}
+
           {panel === "info" && (
             <div className="space-y-3">
               <div className="bg-slate-800/40 rounded-lg p-3 border border-slate-700/30">
@@ -749,8 +759,8 @@ export default function App() {
         </div>
       </div>}
 
-      {/* Chat Area — hidden when forum tab is active */}
-      {panel !== "forum" && <div className="flex-1 flex flex-col min-w-0">
+      {/* Chat Area — hidden when forum or benchmark tab is active */}
+      {panel !== "forum" && panel !== "benchmark" && <div className="flex-1 flex flex-col min-w-0">
         <div className="px-6 py-3.5 border-b border-slate-800/50 flex items-center justify-between bg-slate-900/20 shrink-0">
           <div className="flex items-center gap-3">
             <div className={`px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-widest border ${

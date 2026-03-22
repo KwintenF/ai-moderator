@@ -1,6 +1,13 @@
+# Local planning notes — not for version control
+*_PLAN.md
+
 # Environment variables
 .env
 .env.local
+
+# Benchmark output — export CSVs live here, not tracked in git
+output-data/*
+!output-data/.gitkeep
 
 # Test images and logs — download locally using URLs in test-forums/images-to-test.md
 test-forums/*.jpg

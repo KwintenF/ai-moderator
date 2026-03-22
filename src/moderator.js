@@ -13,10 +13,11 @@ export const MODES = { BLACKLIST: "blacklist", WHITELIST: "whitelist" };
 //                      "shieldgemma"        (returns Yes/No + reasoning)
 //                      "mistral-moderation" (dedicated /v1/moderations endpoint, returns category scores)
 //                      "wildguard"          (returns structured harmful/unharmful verdict)
+//                      "llamaguard"         (returns safe/unsafe + MLCommons category code)
 //
-// Note: mistral-moderation uses fixed safety categories and cannot enforce
-// custom whitelists. Best used as the safety layer in blacklist mode, or
-// alongside an LLM moderator in whitelist mode.
+// Note: mistral-moderation, wildguard, and llamaguard use fixed safety
+// categories and cannot enforce custom whitelists. Best used as the safety
+// layer in blacklist mode, or alongside an LLM moderator in whitelist mode.
 //
 // Note: video (mp4) classification is not yet supported by any of these APIs.
 // Image frames could be extracted client-side as a workaround, but native video
@@ -106,6 +107,78 @@ export const MODELS = [
     canModerate: true,
     canModerateImage: true,
     moderatorFormat: "llm",
+  },
+  {
+    key: "grok-4",
+    label: "Grok 4",
+    modelId: "grok-4",
+    provider: "xAI",
+    format: "openai",
+    endpoint: "/api/xai/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: true,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "grok-4-reasoning",
+    label: "Grok 4 Reasoning",
+    modelId: "grok-4.20-reasoning",
+    provider: "xAI",
+    format: "openai",
+    endpoint: "/api/xai/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "groq-llama3-70b",
+    label: "Llama 3.3 70B",
+    modelId: "llama-3.3-70b-versatile",
+    provider: "Groq",
+    format: "openai",
+    endpoint: "/api/groq/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "groq-llama3-8b",
+    label: "Llama 3.1 8B",
+    modelId: "llama-3.1-8b-instant",
+    provider: "Groq",
+    format: "openai",
+    endpoint: "/api/groq/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "groq-qwen3-32b",
+    label: "Qwen3 32B",
+    modelId: "qwen/qwen3-32b",
+    provider: "Qwen (Groq)",
+    format: "openai",
+    endpoint: "/api/groq/chat/completions",
+    canChat: true,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "llm",
+  },
+  {
+    key: "llama-guard-3-8b",
+    label: "Llama Guard 3 8B",
+    modelId: "llama-guard-3-8b",
+    provider: "Meta (Groq)",
+    format: "openai",
+    endpoint: "/api/groq/chat/completions",
+    canChat: false,
+    canModerate: true,
+    canModerateImage: false,
+    moderatorFormat: "llamaguard",
   },
   {
     key: "wildguard",
@@ -287,7 +360,9 @@ async function callRunpodRaw(model, messages, systemPrompt, maxTokens) {
   return text;
 }
 
-export async function callModel(model, messages, systemPrompt, maxTokens = 1000) {
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+export async function callModel(model, messages, systemPrompt, maxTokens = 1000, { maxRetries = 4, baseDelayMs = 2000 } = {}) {
   if (model.endpoint === "/api/runpod") {
     return callRunpodRaw(model, messages, systemPrompt, maxTokens);
   }
@@ -296,33 +371,74 @@ export async function callModel(model, messages, systemPrompt, maxTokens = 1000)
     ? { model: model.modelId, max_tokens: maxTokens, system: systemPrompt, messages }
     : { model: model.modelId, max_tokens: maxTokens, messages: [{ role: "system", content: systemPrompt }, ...messages] };
 
-  logger.api("callModel →", model.key, "| endpoint:", model.endpoint, "| maxTokens:", maxTokens);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    logger.api("callModel →", model.key, "| endpoint:", model.endpoint, "| attempt:", attempt + 1);
 
-  const response = await fetch(model.endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+    const response = await fetch(model.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-  logger.api("callModel ←", model.key, "| status:", response.status);
+    logger.api("callModel ←", model.key, "| status:", response.status);
 
-  const rawText = await response.text();
-  if (!response.ok) {
-    logger.api("callModel error raw:", rawText.slice(0, 300));
-    let message = "API error";
-    try { message = JSON.parse(rawText)?.error?.message || message; } catch { message = rawText.slice(0, 200); }
-    throw new Error(message);
+    // Retry on 429 (rate limit) or 529 (overloaded) with exponential backoff
+    if (response.status === 429 || response.status === 529) {
+      const retryAfter = response.headers.get("retry-after");
+      const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : baseDelayMs * Math.pow(2, attempt);
+      logger.api("callModel rate limited, waiting", waitMs, "ms before retry");
+      if (attempt < maxRetries) { await sleep(waitMs); continue; }
+    }
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      logger.api("callModel error raw:", rawText.slice(0, 300));
+      let message = "API error";
+      try { message = JSON.parse(rawText)?.error?.message || message; } catch { message = rawText.slice(0, 200); }
+      throw new Error(message);
+    }
+    let data;
+    try { data = JSON.parse(rawText); } catch {
+      logger.api("callModel JSON parse failed, raw:", rawText.slice(0, 200));
+      throw new Error("Invalid JSON response from model");
+    }
+    const text = model.format === "anthropic"
+      ? data.content[0]?.text || ""
+      : data.choices[0]?.message?.content || "";
+    logger.api("callModel result:", text.slice(0, 80));
+    return text;
   }
-  let data;
-  try { data = JSON.parse(rawText); } catch {
-    logger.api("callModel JSON parse failed, raw:", rawText.slice(0, 200));
-    throw new Error("Invalid JSON response from model");
-  }
-  const text = model.format === "anthropic"
-    ? data.content[0]?.text || ""
-    : data.choices[0]?.message?.content || "";
-  logger.api("callModel result:", text.slice(0, 80));
-  return text;
+
+  throw new Error(`Rate limited after ${maxRetries} retries`);
+}
+
+// Llama Guard 3 outputs "safe" or "unsafe\nS<N>" where S1-S14 are MLCommons
+// hazard categories. Served via Groq's OpenAI-compatible endpoint.
+// For input classification the user message is passed as the user role.
+// For output classification the AI response is passed as the assistant role.
+const LLAMA_GUARD_CATEGORIES = {
+  S1: "violent-crimes", S2: "non-violent-crimes", S3: "sex-related-crimes",
+  S4: "child-sexual-exploitation", S5: "defamation", S6: "specialized-advice",
+  S7: "privacy", S8: "intellectual-property", S9: "indiscriminate-weapons",
+  S10: "hate", S11: "suicide-self-harm", S12: "sexual-content",
+  S13: "elections", S14: "code-interpreter-abuse",
+};
+
+function parseLlamaGuardResponse(raw) {
+  const trimmed = raw.trim();
+  const isUnsafe = trimmed.toLowerCase().startsWith("unsafe");
+  const categoryMatch = trimmed.match(/unsafe\s*\n\s*(S\d+(?:,\s*S\d+)*)/i);
+  const rawCodes = categoryMatch ? categoryMatch[1].split(/,\s*/) : [];
+  const categoryNames = rawCodes.map(c => LLAMA_GUARD_CATEGORIES[c.trim().toUpperCase()] ?? c.trim().toLowerCase());
+  return {
+    verdict: isUnsafe ? "BLOCK" : "ALLOW",
+    confidence: null,
+    confidenceEstimated: true,
+    reason: isUnsafe
+      ? `Unsafe: ${categoryNames.length ? categoryNames.join(", ") : rawCodes.join(", ") || "unspecified"}`
+      : "No safety violations detected",
+    category: isUnsafe ? (categoryNames[0] ?? "harmful") : "appropriate",
+  };
 }
 
 // WildGuard uses a fixed classifier prompt and returns three lines:
@@ -408,14 +524,25 @@ async function callMistralModeration(model, text) {
 export async function runClassifier(model, text, mode, blacklist, whitelist, customInstructions, target) {
   logger.mod("runClassifier →", model.key, "| target:", target, "| text:", text.slice(0, 60));
 
+  if (model.moderatorFormat === "llamaguard") {
+    const messages = target === "input"
+      ? [{ role: "user", content: text }]
+      : [{ role: "user", content: "[N/A]" }, { role: "assistant", content: text }];
+    const raw = await callModel(model, messages, "", 20);
+    const result = parseLlamaGuardResponse(raw);
+    logger.mod("runClassifier ← llamaguard:", result.verdict, result.reason);
+    return { ...result, promptUsed: { messages } };
+  }
+
   if (model.moderatorFormat === "wildguard") {
     const prompt = buildWildGuardPrompt(target, text);
     const raw = await callModel(model, [{ role: "user", content: prompt }], "", 64);
-    return parseWildGuardResponse(raw, target);
+    return { ...parseWildGuardResponse(raw, target), promptUsed: { rawPrompt: prompt } };
   }
 
   if (model.moderatorFormat === "mistral-moderation") {
-    return await callMistralModeration(model, text);
+    const result = await callMistralModeration(model, text);
+    return { ...result, promptUsed: { type: "moderation-api", input: text } };
   }
 
   if (model.moderatorFormat === "shieldgemma") {
@@ -423,13 +550,14 @@ export async function runClassifier(model, text, mode, blacklist, whitelist, cus
     const raw = await callModel(model, [{ role: "user", content: prompt }], "", 512);
     const result = parseShieldGemmaResponse(raw);
     logger.mod("runClassifier ← shieldgemma:", result.verdict, result.reason.slice(0, 60));
-    return result;
+    return { ...result, promptUsed: { userMessage: prompt } };
   }
 
   const systemPrompt = buildClassifierPrompt(mode, blacklist, whitelist, customInstructions, target);
+  const userMessage = `Classify this ${target === "input" ? "student message" : "AI response"}:\n\n"${text}"`;
   const raw = await callModel(
     model,
-    [{ role: "user", content: `Classify this ${target === "input" ? "student message" : "AI response"}:\n\n"${text}"` }],
+    [{ role: "user", content: userMessage }],
     systemPrompt,
     512
   );
@@ -438,7 +566,7 @@ export async function runClassifier(model, text, mode, blacklist, whitelist, cus
     if (!jsonMatch) throw new Error("No JSON object found");
     const result = JSON.parse(jsonMatch[0]);
     logger.mod("runClassifier ← llm:", result.verdict, result.reason?.slice(0, 60));
-    return result;
+    return { ...result, promptUsed: { systemPrompt, userMessage } };
   } catch {
     // Truncated response — try to salvage verdict and confidence from partial JSON
     const verdictMatch  = raw.match(/"verdict"\s*:\s*"(ALLOW|BLOCK)"/);
@@ -450,12 +578,13 @@ export async function runClassifier(model, text, mode, blacklist, whitelist, cus
         confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) : 0.8,
         reason:     reasonMatch ? reasonMatch[1] + "…" : "Response truncated",
         category:   verdictMatch[1] === "BLOCK" ? "blocked-topic" : "appropriate",
+        promptUsed: { systemPrompt, userMessage },
       };
       logger.mod("runClassifier salvaged from truncated response:", salvaged.verdict);
       return salvaged;
     }
     logger.mod("runClassifier parse error, raw:", raw.slice(0, 100));
-    return { verdict: "ALLOW", confidence: 0.5, reason: "Classifier parse error — defaulting to allow", category: "appropriate" };
+    return { verdict: "ALLOW", confidence: 0.5, reason: "Classifier parse error — defaulting to allow", category: "appropriate", promptUsed: { systemPrompt, userMessage } };
   }
 }
 
