@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import {
   MODES,
-  CHAT_MODELS, MODERATOR_MODELS, IMAGE_MODERATOR_MODELS,
+  CHAT_MODELS, MODERATOR_MODELS, IMAGE_MODERATOR_MODELS, VIDEO_MODERATOR_MODELS,
   buildAssistantSystemPrompt,
-  callModel, runClassifier, runImageClassifier,
+  callModel, runClassifier, runImageClassifier, runVideoClassifier, runVideoFrameClassifier,
 } from "./moderator.js";
 import BenchmarkTab from "./BenchmarkTab.jsx";
 
@@ -267,12 +267,15 @@ function AuditLog({ log }) {
 function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
   const [textModeratorModel,  setTextModeratorModel]  = useState(MODERATOR_MODELS[0]);
   const [imageModeratorModel, setImageModeratorModel] = useState(IMAGE_MODERATOR_MODELS[0]);
+  const [videoModeratorModel, setVideoModeratorModel] = useState(VIDEO_MODERATOR_MODELS[0]);
   const [posts, setPosts] = useState("");
   const [images, setImages] = useState([]); // [{ name, caption, base64, mediaType, dataUrl }]
+  const [videos, setVideos] = useState([]); // [{ name, caption, file, objectUrl }]
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
+  const videoInputRef = useRef(null);
 
   const loadFile = (e) => {
     const file = e.target.files[0];
@@ -284,6 +287,7 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
   };
 
   const [imageError, setImageError] = useState("");
+  const [videoError, setVideoError] = useState("");
 
   const loadImages = (e) => {
     const files = Array.from(e.target.files);
@@ -304,6 +308,29 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
       reader.readAsDataURL(file);
     });
     e.target.value = "";
+  };
+
+  const loadVideos = (e) => {
+    const files = Array.from(e.target.files);
+    const unsupported = files.filter(f => !f.type.startsWith("video/"));
+    if (unsupported.length > 0) {
+      setVideoError(`Unsupported file type — use mp4, webm, or mov`);
+      e.target.value = "";
+      return;
+    }
+    setVideoError("");
+    files.forEach(file => {
+      const objectUrl = URL.createObjectURL(file);
+      setVideos(prev => [...prev, { name: file.name, caption: "", file, objectUrl }]);
+    });
+    e.target.value = "";
+  };
+
+  const removeVideo = (i) => {
+    setVideos(prev => {
+      URL.revokeObjectURL(prev[i].objectUrl);
+      return prev.filter((_, j) => j !== i);
+    });
   };
 
   const parsePosts = (raw) => {
@@ -344,8 +371,42 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
       }
     }
 
+    for (const vid of videos) {
+      try {
+        let result;
+        if (videoModeratorModel.canModerateVideo && videoModeratorModel.videoFormat !== "frame-extract") {
+          // Native path (Gemini, Hive): read file to base64
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result.split(",")[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(vid.file);
+          });
+          result = await runVideoClassifier(videoModeratorModel, base64, vid.file.type, vid.caption, mode, blacklist, whitelist, customInstructions);
+        } else {
+          // Frame extraction path (Claude, or any image model): pass File directly
+          result = await runVideoFrameClassifier(videoModeratorModel, vid.file, vid.caption, mode, blacklist, whitelist, customInstructions);
+        }
+        out.push({ post: vid.caption || vid.name, author: null, timestamp: null, type: "video", objectUrl: vid.objectUrl, ...result, time });
+      } catch (err) {
+        out.push({ post: vid.caption || vid.name, author: null, timestamp: null, type: "video", objectUrl: vid.objectUrl, verdict: "ERROR", confidence: 0, category: "error", reason: err.message || "Failed to classify video", time });
+      }
+    }
+
     setResults(out);
     setRunning(false);
+  };
+
+  const downloadFrames = (r) => {
+    const base = r.post.replace(/[^a-z0-9]/gi, "_").slice(0, 30) || "video";
+    r.frameResults.forEach((f, i) => {
+      setTimeout(() => {
+        const a = document.createElement("a");
+        a.href = `data:image/jpeg;base64,${f.base64}`;
+        a.download = `${base}_f${String(i + 1).padStart(2, "0")}_${f.timestamp.toFixed(1)}s_${f.verdict}.jpg`;
+        a.click();
+      }, i * 200);
+    });
   };
 
   const exportCSV = () => {
@@ -363,7 +424,7 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
     URL.revokeObjectURL(url);
   };
 
-  const totalItems = parsePosts(posts).length + images.length;
+  const totalItems = parsePosts(posts).length + images.length + videos.length;
   const blockedCount = results.filter(r => r.verdict === "BLOCK").length;
 
   return (
@@ -412,9 +473,44 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
         )}
       </div>
 
+      {/* Video uploads */}
+      <div>
+        <div className="flex justify-between items-center mb-2">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Videos</p>
+          <button onClick={() => videoInputRef.current.click()} className="px-3 py-1 text-[10px] font-mono bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-100 rounded-md transition-colors">+ Add videos</button>
+          <input ref={videoInputRef} type="file" accept="video/*" multiple onChange={loadVideos} className="hidden" />
+        </div>
+        <p className="text-[9px] text-slate-600 mb-2">mp4, webm, mov — use yt-dlp to download from TikTok / archive.org</p>
+        {videoError && <p className="text-[9px] text-red-400 font-mono mb-2">{videoError}</p>}
+        {videos.length === 0 ? (
+          <p className="text-[9px] text-slate-700 font-mono italic">No videos added</p>
+        ) : (
+          <div className="space-y-2">
+            {videos.map((vid, i) => (
+              <div key={i} className="flex gap-2 items-center bg-slate-900/40 rounded-lg p-2 border border-slate-700/30">
+                <video src={vid.objectUrl} className="w-16 h-10 object-cover rounded shrink-0 bg-slate-950" muted />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[9px] text-slate-500 font-mono truncate mb-1">{vid.name}</p>
+                  <input
+                    value={vid.caption}
+                    onChange={e => setVideos(prev => prev.map((v, j) => j === i ? { ...v, caption: e.target.value } : v))}
+                    placeholder="Optional caption..."
+                    className="w-full bg-transparent text-[10px] text-slate-300 placeholder-slate-600 focus:outline-none font-mono"
+                  />
+                </div>
+                <button onClick={() => removeVideo(i)} className="text-slate-700 hover:text-slate-400 text-[10px] shrink-0">x</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="space-y-2 border border-slate-800/50 rounded-lg p-3">
         <ModelDropdown label="Text moderator" current={textModeratorModel} setter={setTextModeratorModel} pool={MODERATOR_MODELS} />
         <ModelDropdown label="Image moderator" current={imageModeratorModel} setter={setImageModeratorModel} pool={IMAGE_MODERATOR_MODELS} />
+        {VIDEO_MODERATOR_MODELS.length > 0 && (
+          <ModelDropdown label="Video moderator" current={videoModeratorModel} setter={setVideoModeratorModel} pool={VIDEO_MODERATOR_MODELS} />
+        )}
       </div>
 
       <button
@@ -451,7 +547,7 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
                 "bg-slate-800/30 border-slate-700/20"}`}>
                 <div className="flex justify-between mb-1">
                   <span className={r.verdict === "BLOCK" ? "text-red-400" : r.verdict === "ERROR" ? "text-amber-400" : "text-emerald-400"}>{r.verdict}</span>
-                  <span className="text-slate-600">{r.type === "image" ? "image · " : ""}{r.category} · {r.time}</span>
+                  <span className="text-slate-600">{r.type === "image" ? "image · " : r.type === "video" ? `video${r.framesAnalyzed ? ` (${r.framesAnalyzed} frames)` : ""} · ` : ""}{r.category} · {r.time}</span>
                 </div>
                 {(r.author || r.timestamp) && (
                   <div className="flex gap-2 mb-1">
@@ -461,6 +557,30 @@ function ForumModerator({ mode, blacklist, whitelist, customInstructions }) {
                 )}
                 {r.type === "image" && r.dataUrl && (
                   <img src={r.dataUrl} alt="" className="w-16 h-16 object-cover rounded mb-1" />
+                )}
+                {r.type === "video" && r.objectUrl && (
+                  <video src={r.objectUrl} className="w-24 h-14 object-cover rounded mb-1 bg-slate-950" muted controls />
+                )}
+                {r.type === "video" && r.frameResults?.length > 0 && (
+                  <div className="mb-1">
+                    <div className="flex gap-1 flex-wrap">
+                      {r.frameResults.map((f, i) => (
+                        <div key={i} className="relative shrink-0">
+                          <img
+                            src={`data:image/jpeg;base64,${f.base64}`}
+                            alt={`frame ${i + 1}`}
+                            className={`w-14 h-9 object-cover rounded border ${f.verdict === "BLOCK" ? "border-red-500" : f.verdict === "ERROR" ? "border-amber-500" : "border-emerald-800"}`}
+                          />
+                          <span className="absolute bottom-0 left-0 text-[7px] bg-black/60 text-slate-300 px-0.5 rounded-br">
+                            {f.timestamp.toFixed(1)}s
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <button onClick={() => downloadFrames(r)} className="text-[8px] text-slate-600 hover:text-slate-400 transition-colors font-mono mt-0.5">
+                      download frames
+                    </button>
+                  </div>
                 )}
                 <p className="text-slate-500 truncate">"{r.post.slice(0, 60)}{r.post.length > 60 ? "..." : ""}"</p>
                 <p className="text-slate-600 mt-0.5 italic">{r.reason}</p>

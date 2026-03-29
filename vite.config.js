@@ -56,7 +56,7 @@ return {
           });
         },
       },
-      "/api/google": {
+      "^/api/google(?!-)": {
         target: "https://generativelanguage.googleapis.com",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/google/, "/v1beta/openai"),
@@ -67,6 +67,25 @@ return {
           });
           proxy.on("proxyRes", (proxyRes, req) => {
             log("google ←", req.url, "| status:", proxyRes.statusCode);
+          });
+        },
+      },
+      // Native Gemini API — used for video classification (generateContent with inline video)
+      // and future Files API uploads. Does NOT go through the OpenAI-compat layer.
+      // Uses x-goog-api-key (not Bearer) — Bearer is for OAuth tokens, not API keys.
+      "/api/google-native": {
+        target: "https://generativelanguage.googleapis.com",
+        changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
+        rewrite: (path) => path.replace(/^\/api\/google-native/, ""),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            log("google-native →", req.url, "| key present:", !!env.GOOGLE_AI_KEY);
+            proxyReq.setHeader("x-goog-api-key", env.GOOGLE_AI_KEY);
+          });
+          proxy.on("proxyRes", (proxyRes, req) => {
+            log("google-native ←", req.url, "| status:", proxyRes.statusCode);
           });
         },
       },
@@ -95,6 +114,22 @@ return {
           });
           proxy.on("proxyRes", (proxyRes, req) => {
             log("groq ←", req.url, "| status:", proxyRes.statusCode);
+          });
+        },
+      },
+      "/api/hive": {
+        target: "https://api.thehive.ai",
+        changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
+        rewrite: (path) => path.replace(/^\/api\/hive/, ""),
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            log("hive →", req.url, "| key present:", !!env.HIVE_API_KEY);
+            proxyReq.setHeader("Authorization", `Bearer ${env.HIVE_API_KEY}`);
+          });
+          proxy.on("proxyRes", (proxyRes, req) => {
+            log("hive ←", req.url, "| status:", proxyRes.statusCode);
           });
         },
       },

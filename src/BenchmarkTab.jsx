@@ -8,7 +8,18 @@ import { PRESETS } from "./presets.js";
 
 const STORAGE_KEY  = "benchmark_results_v1";
 const PROGRESS_KEY = "benchmark_progress_v1";
-const ETHOS_PATH   = "/input-data/ethos_binary.json";
+
+const JSON_DATASETS = [
+  { id: "ethos",          path: "/input-data/ethos_binary.json",     label: "ETHOS (original)",      attack: null },
+  { id: "homoglyph",      path: "/input-data/ethos_homoglyph.json",  label: "Homoglyph substitution", attack: "homoglyph" },
+  { id: "zero_width",     path: "/input-data/ethos_zero_width.json", label: "Zero-width injection",   attack: "zero_width" },
+  { id: "char_spacing",   path: "/input-data/ethos_char_spacing.json", label: "Character spacing",    attack: "char_spacing" },
+  { id: "leet",           path: "/input-data/ethos_leet.json",       label: "Leet speak",             attack: "leet" },
+  { id: "char_repeat",    path: "/input-data/ethos_char_repeat.json", label: "Character repetition",  attack: "char_repeat" },
+  { id: "punct_insert",   path: "/input-data/ethos_punct_insert.json", label: "Punctuation insertion", attack: "punct_insert" },
+  { id: "word_reversal",  path: "/input-data/ethos_word_reversal.json", label: "Word reversal",       attack: "word_reversal" },
+  { id: "typo",           path: "/input-data/ethos_typo.json",       label: "Typo injection",         attack: "typo" },
+];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +78,7 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
   };
 
   // ── dataset state
-  const [datasetSource, setDatasetSource] = useState("ethos"); // "ethos" | "csv"
+  const [datasetSource, setDatasetSource] = useState("ethos"); // json dataset id | "csv"
   const [rawRows, setRawRows]  = useState([]);     // parsed but unrun rows
   const [csvError, setCsvError] = useState("");
   const [csvColumns, setCsvColumns] = useState({ text: "", label: "" });
@@ -109,20 +120,23 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
     }
   }, [results]);
 
-  // ── load ETHOS on mount / when source switches to ethos
+  // ── load JSON dataset when source is one of the known JSON datasets
   useEffect(() => {
-    if (datasetSource !== "ethos") return;
-    fetch(ETHOS_PATH)
+    const ds = JSON_DATASETS.find(d => d.id === datasetSource);
+    if (!ds) return;
+    fetch(ds.path)
       .then(r => r.json())
       .then(data => {
         setRawRows(data.map(d => ({
-          text:   d.text,
-          truth:  normaliseLabel(d.label),
-          source: "ethos",
+          text:         d.text,
+          originalText: d.originalText ?? null,
+          truth:        normaliseLabel(d.label),
+          source:       ds.id,
+          attack:       d.attack ?? null,
         })));
         setCsvError("");
       })
-      .catch(() => setCsvError("Failed to load ETHOS dataset from /input-data/ethos_binary.json"));
+      .catch(() => setCsvError(`Failed to load dataset from ${ds.path}`));
   }, [datasetSource]);
 
   // ── CSV upload
@@ -230,10 +244,13 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
       customInstructions,
       renderedSystemPrompt: buildClassifierPrompt(mode, blacklist, whitelist, customInstructions, "input"),
     };
+    const activeDs = JSON_DATASETS.find(d => d.id === datasetSource);
     const runMeta = {
       models: selectedModels.map(m => ({ key: m.key, label: m.label, provider: m.provider })),
       startedAt: new Date().toISOString(),
       dataset: datasetSource,
+      datasetLabel: activeDs?.label ?? datasetSource,
+      attackType: activeDs?.attack ?? null,
       promptConfig,
     };
     // Clear any stale interrupted run before starting fresh
@@ -320,23 +337,28 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
 
         {/* Dataset */}
         <div>
-          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-2">Dataset</p>
-          <div className="flex gap-2 mb-3">
-            {["ethos", "csv"].map(s => (
-              <button key={s} onClick={() => setDatasetSource(s)}
-                className={`flex-1 py-1.5 rounded text-[10px] uppercase tracking-wider transition-colors border ${
-                  datasetSource === s
-                    ? "bg-violet-600/20 border-violet-500/50 text-violet-300"
-                    : "border-slate-700/50 text-slate-500 hover:text-slate-300"
-                }`}>
-                {s === "ethos" ? "ETHOS" : "Upload CSV"}
-              </button>
-            ))}
-          </div>
+          <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1">Dataset</p>
+          <select
+            value={datasetSource}
+            onChange={e => setDatasetSource(e.target.value)}
+            className="w-full bg-slate-900/60 border border-slate-700/50 rounded-lg px-3 py-2 text-[11px] text-slate-300 focus:outline-none focus:border-slate-500 font-mono appearance-none cursor-pointer mb-2"
+          >
+            <optgroup label="ETHOS">
+              {JSON_DATASETS.filter(d => !d.attack).map(d => (
+                <option key={d.id} value={d.id}>{d.label}</option>
+              ))}
+            </optgroup>
+            <optgroup label="Adversarial (Tier 1)">
+              {JSON_DATASETS.filter(d => d.attack).map(d => (
+                <option key={d.id} value={d.id}>{d.label}</option>
+              ))}
+            </optgroup>
+            <option value="csv">Upload CSV…</option>
+          </select>
 
-          {datasetSource === "ethos" && rawRows.length > 0 && (
+          {JSON_DATASETS.find(d => d.id === datasetSource) && rawRows.length > 0 && (
             <p className="text-[10px] text-slate-500">
-              {rawRows.length} rows loaded &mdash; {rawRows.filter(r => r.truth).length} harmful,{" "}
+              {rawRows.length} rows &mdash; {rawRows.filter(r => r.truth).length} harmful,{" "}
               {rawRows.filter(r => !r.truth).length} safe
             </p>
           )}
@@ -481,8 +503,13 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
               <div className="flex items-center gap-3 mb-3">
                 <p className="text-[9px] text-slate-500 uppercase tracking-widest">Results</p>
                 <p className="text-[10px] text-slate-600">
-                  {results.rows.length} rows &mdash; {results.dataset} &mdash;{" "}
-                  {new Date(results.startedAt).toLocaleString()}
+                  {results.rows.length} rows &mdash; {results.datasetLabel ?? results.dataset}
+                  {results.attackType && (
+                    <span className="ml-1.5 px-1.5 py-0.5 bg-amber-900/30 border border-amber-700/40 text-amber-400 rounded text-[8px] font-mono">
+                      ⚡ {results.attackType}
+                    </span>
+                  )}
+                  {" "}&mdash; {new Date(results.startedAt).toLocaleString()}
                 </p>
               </div>
               <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${results.models.length}, minmax(0,1fr))` }}>
