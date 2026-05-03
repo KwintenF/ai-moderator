@@ -15,6 +15,8 @@ return {
       "/api/anthropic": {
         target: "https://api.anthropic.com",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/anthropic/, ""),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
@@ -31,6 +33,8 @@ return {
       "/api/openai": {
         target: "https://api.openai.com",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/openai/, ""),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
@@ -45,6 +49,8 @@ return {
       "/api/mistral": {
         target: "https://api.mistral.ai",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/mistral/, ""),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
@@ -59,6 +65,8 @@ return {
       "^/api/google(?!-)": {
         target: "https://generativelanguage.googleapis.com",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/google/, "/v1beta/openai"),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
@@ -92,6 +100,8 @@ return {
       "/api/xai": {
         target: "https://api.x.ai",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/xai/, "/v1"),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {
@@ -106,6 +116,8 @@ return {
       "/api/groq": {
         target: "https://api.groq.com",
         changeOrigin: true,
+        timeout: 120000,
+        proxyTimeout: 120000,
         rewrite: (path) => path.replace(/^\/api\/groq/, "/openai/v1"),
         configure: (proxy) => {
           proxy.on("proxyReq", (proxyReq, req) => {

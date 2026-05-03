@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,15 @@ PROVIDERS = {
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
         "format":   "openai",
     },
+    # Endpoint URL is read from RUNPOD_ENDPOINT_URL at call time.
+    # Timeout is high: serverless cold-start can take 2-5 min before first token.
+    "qwen-runpod": {
+        "provider": "RunPod",
+        "key_env":  "RUNPOD_API_KEY",
+        "endpoint": None,   # resolved from RUNPOD_ENDPOINT_URL at runtime
+        "format":   "runpod",
+        "timeout":  360,
+    },
 }
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
@@ -125,7 +135,10 @@ def call_llm(model_id: str, system: str, user: str,
             f"API key not found: set {cfg['key_env']} in .env or environment"
         )
 
-    if cfg["format"] == "anthropic":
+    fmt = cfg["format"]
+
+    if fmt == "anthropic":
+        endpoint = cfg["endpoint"]
         headers = {
             "x-api-key":         api_key,
             "anthropic-version": "2023-06-01",
@@ -137,7 +150,25 @@ def call_llm(model_id: str, system: str, user: str,
             "system":     system,
             "messages":   [{"role": "user", "content": user}],
         }
+    elif fmt == "runpod":
+        endpoint = os.environ.get("RUNPOD_ENDPOINT_URL", "").rstrip("/") + "/runsync"
+        if endpoint == "/runsync":
+            raise RuntimeError("RUNPOD_ENDPOINT_URL not set in .env or environment")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+        }
+        body = {
+            "input": {
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "max_tokens": max_tokens,
+            }
+        }
     else:  # openai-compatible
+        endpoint = cfg["endpoint"]
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type":  "application/json",
@@ -153,8 +184,8 @@ def call_llm(model_id: str, system: str, user: str,
 
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(cfg["endpoint"], headers=headers,
-                                 json=body, timeout=30)
+            resp = requests.post(endpoint, headers=headers,
+                                 json=body, timeout=cfg.get("timeout", 60))
         except requests.RequestException as exc:
             if attempt == max_retries:
                 raise RuntimeError(f"Network error: {exc}") from exc
@@ -176,8 +207,36 @@ def call_llm(model_id: str, system: str, user: str,
             raise RuntimeError(f"API error {resp.status_code}: {msg}")
 
         data = resp.json()
-        if cfg["format"] == "anthropic":
+        if fmt == "anthropic":
             return data["content"][0]["text"].strip()
+        elif fmt == "runpod":
+            # /runsync can fall back to async if cold-start exceeds RunPod's
+            # server-side sync timeout. Poll /status/{id} until COMPLETED.
+            status = data.get("status")
+            if status in ("IN_QUEUE", "IN_PROGRESS"):
+                job_id    = data["id"]
+                base_url  = os.environ.get("RUNPOD_ENDPOINT_URL", "").rstrip("/")
+                poll_url  = f"{base_url}/status/{job_id}"
+                poll_hdrs = {"Authorization": f"Bearer {api_key}"}
+                print(f"    [RunPod] queued ({job_id[:16]}…), polling…", file=sys.stderr)
+                for _ in range(60):          # up to 5 min (60 × 5 s)
+                    time.sleep(5)
+                    pr = requests.get(poll_url, headers=poll_hdrs, timeout=30)
+                    pr.raise_for_status()
+                    data = pr.json()
+                    if data.get("status") == "COMPLETED":
+                        break
+                    if data.get("status") == "FAILED":
+                        raise RuntimeError(f"RunPod job failed: {data}")
+                else:
+                    raise RuntimeError("RunPod job did not complete within 5 minutes")
+            choice = data.get("output", [{}])[0].get("choices", [{}])[0]
+            text = (choice.get("tokens", [None])[0]
+                    or choice.get("text")
+                    or choice.get("message", {}).get("content", ""))
+            if not text.strip():
+                print(f"    [RunPod debug] raw response: {json.dumps(data)[:400]}", file=sys.stderr)
+            return text.strip()
         else:
             return data["choices"][0]["message"]["content"].strip()
 
@@ -232,15 +291,19 @@ def process_row(row: dict, prompt_cfg: dict, model_id: str,
     else:
         try:
             perturbed = call_llm(model_id, system, user)
-            if _is_refusal(perturbed):
-                success   = False
-                perturbed = original      # fall back to original
+            if not perturbed.strip():
+                success   = "error"
+                perturbed = original
+                print(f"    ✗  empty response from model", file=sys.stderr)
+            elif _is_refusal(perturbed):
+                success   = "refused"
+                perturbed = original
                 print(f"    ↩  refusal detected — keeping original", file=sys.stderr)
             else:
                 success = True
         except RuntimeError as exc:
             perturbed = original
-            success   = False
+            success   = "error"
             print(f"    ✗  API error: {exc}", file=sys.stderr)
 
     cfg_info = PROVIDERS[model_id]
@@ -286,8 +349,8 @@ def main():
                         help="Output JSON path (default: public/input-data/ethos_<attack>_<model>.json)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Process only the first N rows (for testing)")
-    parser.add_argument("--delay", type=float, default=0.5,
-                        help="Seconds to wait between API calls (default: 0.5)")
+    parser.add_argument("--delay", type=float, default=1.5,
+                        help="Seconds to wait between API calls (default: 1.5)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be sent without calling the API")
     parser.add_argument("--list-attacks", action="store_true",
@@ -340,21 +403,26 @@ def main():
     if args.dry_run:
         print("  Mode     : DRY RUN — no API calls")
 
-    # Resume: load existing output if present
+    # Resume: load existing output if present.
+    # Only keep successfully transformed rows in results — refused/error rows are
+    # always retried (either with the same model or a different one via --input/--output).
     existing: list[dict] = []
     if out_path.exists() and not args.dry_run:
         with open(out_path, encoding="utf-8") as f:
             existing = json.load(f)
-        print(f"  Resume   : {len(existing)} rows already in output file")
+        n_ok = sum(1 for r in existing if r.get("attack", {}).get("success") is True)
+        n_retry = len(existing) - n_ok
+        print(f"  Resume   : {n_ok} successful rows kept, {n_retry} refused/error rows queued for retry")
 
     existing_originals = {
         r.get("originalText", r["text"])
         for r in existing
-        if r.get("attack", {}).get("success") is not False
+        if r.get("attack", {}).get("success") is True
     }
 
-    # Process
-    results = list(existing)
+    # Start results from only the successful rows — refused/error rows will be
+    # re-appended after (re)processing so there are no duplicates.
+    results = [r for r in existing if r.get("attack", {}).get("success") is True]
     skipped = 0
     processed = 0
     failed = 0
@@ -376,32 +444,35 @@ def main():
         out_row = process_row(row, prompt_cfg, args.model, dry_run=args.dry_run)
         results.append(out_row)
 
-        if args.dry_run or out_row["attack"]["success"] is True:
+        success = out_row["attack"]["success"]
+        if args.dry_run or success is None:
             print(f"→ {out_row['text'][:60].replace(chr(10), ' ')}…")
             processed += 1
-        elif out_row["attack"]["success"] is False:
-            # distinguish refusal from API error via stderr output already printed
-            print("↩ kept original")
-            refused += 1
-        else:
-            print("(dry run)")
+        elif success is True:
+            print(f"→ {out_row['text'][:60].replace(chr(10), ' ')}…")
             processed += 1
+        elif success == "refused":
+            print("↩ kept original (refusal)")
+            refused += 1
+        else:  # "error"
+            print("✗ kept original (API error)")
+            failed += 1
 
-        # Save after every row so progress survives interruption
+        # Atomic save after every row — write to .tmp then rename so a crash
+        # mid-write never leaves a corrupt JSON file.
         if not args.dry_run:
-            with open(out_path, "w", encoding="utf-8") as f:
+            tmp = out_path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, out_path)
 
         if i < len(rows_to_run) - 1 and not args.dry_run:
             time.sleep(args.delay)
 
-    # Final save (also covers dry-run if we want to inspect output)
     if args.dry_run:
         print(f"\n[dry run] would write {len(results)} rows to {out_path}")
     else:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"\nDone.  processed={processed}  refused={refused}  skipped={skipped}  failed={failed}")
+        print(f"\nDone.  processed={processed}  refused={refused}  failed={failed}  skipped={skipped}")
         print(f"Saved {len(results)} rows → {out_path}")
 
 

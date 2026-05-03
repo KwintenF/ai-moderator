@@ -388,7 +388,7 @@ async function callRunpodRaw(model, messages, systemPrompt, maxTokens) {
         max_tokens: maxTokens,
       };
   logger.api("callRunpodRaw →", model.key, "| endpoint:", model.endpoint);
-  const response = await fetch(model.endpoint, {
+  const response = await fetchWithTimeout(model.endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ input }),
@@ -411,6 +411,21 @@ async function callRunpodRaw(model, messages, systemPrompt, maxTokens) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+const FETCH_TIMEOUT_MS = 120_000; // 2 minutes per request
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 export async function callModel(model, messages, systemPrompt, maxTokens = 1000, { maxRetries = 4, baseDelayMs = 2000 } = {}) {
   if (model.endpoint === "/api/runpod") {
     return callRunpodRaw(model, messages, systemPrompt, maxTokens);
@@ -423,7 +438,7 @@ export async function callModel(model, messages, systemPrompt, maxTokens = 1000,
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     logger.api("callModel →", model.key, "| endpoint:", model.endpoint, "| attempt:", attempt + 1);
 
-    const response = await fetch(model.endpoint, {
+    const response = await fetchWithTimeout(model.endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -542,7 +557,7 @@ function parseWildGuardResponse(raw, target) {
 // highest-scoring category score as confidence.
 async function callModerationApi(model, text) {
   logger.api("callModerationApi →", model.endpoint);
-  const response = await fetch(model.endpoint, {
+  const response = await fetchWithTimeout(model.endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: model.modelId, input: text }),
@@ -622,7 +637,7 @@ async function callHiveApi(blob, filename) {
   const form = new FormData();
   form.append("media", blob, filename);
   logger.api("callHiveApi → /api/hive | type:", blob.type);
-  const response = await fetch("/api/hive/api/v3/hive/visual-moderation", {
+  const response = await fetchWithTimeout("/api/hive/api/v3/hive/visual-moderation", {
     method: "POST",
     body: form,
   });
@@ -649,7 +664,7 @@ async function callHiveAiDetectApi(base64, mediaType) {
   const form = new FormData();
   form.append("media", blob, "media");
   logger.api("callHiveAiDetectApi → /api/hive | type:", blob.type);
-  const response = await fetch("/api/hive/api/v3/hive/ai-generated-and-deepfake-content-detection", {
+  const response = await fetchWithTimeout("/api/hive/api/v3/hive/ai-generated-and-deepfake-content-detection", {
     method: "POST",
     body: form,
   });
@@ -847,7 +862,7 @@ async function callGeminiNative(modelId, systemInstruction, parts, maxTokens) {
     generation_config: { max_output_tokens: maxTokens },
   };
   logger.api("callGeminiNative →", modelId, "| url:", url);
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

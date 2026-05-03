@@ -70,21 +70,18 @@ export function computeMetrics(rows, modelKey) {
 // Calls onProgress({ done, total, modelKey, rowIndex }) after each classification.
 // Returns rows with results filled in.
 // interCallDelayMs: pause between every API call to stay well under rate limits.
-export async function runBenchmark(rows, models, mode, blacklist, whitelist, customInstructions, onProgress, interCallDelayMs = 500) {
-  // Count already-completed pairs (for resume — rows may have partial results)
+export async function runBenchmark(rows, models, mode, blacklist, whitelist, customInstructions, onProgress, interCallDelayMs = 500, signal = null) {
+  // Count already-completed pairs; ERROR results are not counted so they get retried.
+  const isComplete = (r) => r !== undefined && r.verdict !== "ERROR";
   const alreadyDone = rows.reduce((n, row) =>
-    n + models.filter(m => row.results[m.key] !== undefined).length, 0);
+    n + models.filter(m => isComplete(row.results[m.key])).length, 0);
   const total = rows.length * models.length;
   let done = alreadyDone;
 
   for (const row of rows) {
     for (const model of models) {
-      // Skip pairs already completed in a previous (interrupted) run
-      if (row.results[model.key] !== undefined) {
-        done++;
-        onProgress({ done, total, modelKey: model.key, rowIndex: rows.indexOf(row) });
-        continue;
-      }
+      if (isComplete(row.results[model.key])) continue; // resume: done pre-seeded with alreadyDone
+      if (signal?.aborted) throw new Error("Aborted");
       const t0 = Date.now();
       try {
         const result = await runClassifier(model, row.text, mode, blacklist, whitelist, customInstructions, "input");

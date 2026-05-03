@@ -19,6 +19,8 @@ const JSON_DATASETS = [
   { id: "punct_insert",   path: "/input-data/ethos_punct_insert.json", label: "Punctuation insertion", attack: "punct_insert" },
   { id: "word_reversal",  path: "/input-data/ethos_word_reversal.json", label: "Word reversal",       attack: "word_reversal" },
   { id: "typo",           path: "/input-data/ethos_typo.json",       label: "Typo injection",         attack: "typo" },
+  { id: "context_inject", path: "/input-data/ethos_context_inject_claude-haiku-4-5-20251001.json", label: "Context injection (Tier 2)", attack: "context_inject" },
+  { id: "implicitise",    path: "/input-data/ethos_implicitise_claude-haiku-4-5-20251001.json",    label: "Implicitise (Tier 2)",       attack: "implicitise" },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -96,6 +98,7 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const abortRef = useRef(false);
+  const abortControllerRef = useRef(null);
 
   // ── interrupted run detection
   const [interrupted, setInterrupted] = useState(() => {
@@ -177,11 +180,13 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
 
   const selectedModels = MODERATOR_MODELS.filter(m => selectedKeys.includes(m.key));
 
-  // sample: take evenly from both classes for a balanced sample
+  // sample: balanced 50/50 unless full dataset is selected, in which case
+  // return every row in a fixed order so runs are comparable across prompts.
   const getSample = () => {
+    if (sampleSize >= rawRows.length) return [...rawRows];
     const harmful = rawRows.filter(r => r.truth === true);
     const safe    = rawRows.filter(r => r.truth === false);
-    const n = Math.min(sampleSize, rawRows.length);
+    const n    = sampleSize;
     const half = Math.floor(n / 2);
     const shuffle = arr => [...arr].sort(() => Math.random() - 0.5);
     return [
@@ -192,6 +197,8 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
 
   const startRun = async (rows, models, runMeta) => {
     abortRef.current = false;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setRunning(true);
     setProgress({ done: 0, total: 0 });
     setInterrupted(null);
@@ -219,7 +226,9 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
           setProgress(p);
           saveProgress(p);
           if (abortRef.current) throw new Error("Aborted");
-        }
+        },
+        500,
+        controller.signal
       );
     } catch (err) {
       // "Aborted" is expected when the user clicks Stop — leave progress for resume.
@@ -267,6 +276,24 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
       startedAt: interrupted.startedAt,
       dataset: interrupted.dataset,
       promptConfig: interrupted.promptConfig,
+    });
+  };
+
+  const errorCount = results
+    ? results.rows.reduce((n, row) =>
+        n + results.models.filter(m => row.results[m.key]?.verdict === "ERROR").length, 0)
+    : 0;
+
+  const handleRetryErrors = () => {
+    if (!results || !errorCount) return;
+    const models = results.models.map(m => MODERATOR_MODELS.find(x => x.key === m.key) ?? m);
+    startRun(results.rows.map(r => ({ ...r, results: { ...r.results } })), models, {
+      models: results.models,
+      startedAt: results.startedAt,
+      dataset: results.dataset,
+      datasetLabel: results.datasetLabel,
+      attackType: results.attackType,
+      promptConfig: results.promptConfig,
     });
   };
 
@@ -459,7 +486,7 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
             {running ? `Running… ${progress.done}/${progress.total}` : "Run benchmark"}
           </button>
           {running && (
-            <button onClick={() => { abortRef.current = true; }}
+            <button onClick={() => { abortRef.current = true; abortControllerRef.current?.abort(); }}
               className="w-full py-1.5 border border-slate-700 hover:border-red-700 rounded-lg text-[10px] text-slate-400 hover:text-red-400 transition-colors">
               Stop
             </button>
@@ -472,11 +499,18 @@ export default function BenchmarkTab({ mode: propMode, blacklist: propBlacklist,
           )}
         </div>
 
-        {/* Export */}
+        {/* Export / Retry errors */}
         {results && (
           <button onClick={handleExport}
             className="w-full py-1.5 border border-slate-700/50 hover:border-slate-500 rounded-lg text-[10px] text-slate-400 hover:text-slate-200 transition-colors">
             Export CSV
+          </button>
+        )}
+
+        {results && errorCount > 0 && !running && (
+          <button onClick={handleRetryErrors}
+            className="w-full py-1.5 border border-amber-700/40 hover:border-amber-500 rounded-lg text-[10px] text-amber-400 hover:text-amber-200 transition-colors">
+            Retry {errorCount} error{errorCount !== 1 ? "s" : ""}
           </button>
         )}
 
