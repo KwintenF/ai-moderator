@@ -1,6 +1,9 @@
-# Local planning notes — not for version control
+# Local planning and report notes — not for version control
 *_PLAN.md
 PRESET_POLICY_NOTES.md
+BENCHMARK_SEARCH_TERMS.md
+REPORT_NOTES.md
+test-forums/platform-benchmark-posts.csv
 
 # Environment variables
 .env
